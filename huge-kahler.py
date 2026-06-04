@@ -301,32 +301,30 @@ def compute_sentence_silhouette(model, proj_head=None):
     Each sentence is mean-pooled over token positions after ODE flow."""
     was_training = model.training
     model.eval()
-    try:
-        all_z = []
-        all_labels = []
-        with torch.no_grad():
-            t_span = torch.tensor([0.0, ODE_DEPTH], device=device)
-            for label, group in [(1, action_sentences), (0, descriptive_sentences)]:
-                for sentence in group:
-                    tokens = enc.encode_ordinary(sentence)
-                    input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
-                    z = model.embed(input_ids)
-                    for ode_func in model.ode_funcs:
-                        z = odeint(ode_func, z, t_span, method='euler', options={'step_size': 1.25})[-1]
-                    # Mean-pool over token positions → one vector per sentence
-                    z_mean = torch.view_as_real(z[0]).reshape(z.shape[1], -1).mean(dim=0).cpu().numpy()
-                    all_z.append(z_mean)
-                    all_labels.append(label)
-        z_array = np.array(all_z)
-        if proj_head is not None:
-            z_array = project_embeddings(z_array, proj_head)
-        labels = np.array(all_labels)
-        if not np.isfinite(z_array).all() or len(set(labels)) < 2:
-            return float('nan')
-        return silhouette_score(z_array, labels)
-    finally:
-        if was_training:
-            model.train()
+    all_z = []
+    all_labels = []
+    with torch.no_grad():
+        t_span = torch.tensor([0.0, ODE_DEPTH], device=device)
+        for label, group in [(1, action_sentences), (0, descriptive_sentences)]:
+            for sentence in group:
+                tokens = enc.encode_ordinary(sentence)
+                input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
+                z = model.embed(input_ids)
+                for ode_func in model.ode_funcs:
+                    z = odeint(ode_func, z, t_span, method='euler', options={'step_size': 1.25})[-1]
+                # Mean-pool over token positions → one vector per sentence
+                z_mean = torch.view_as_real(z[0]).reshape(z.shape[1], -1).mean(dim=0).cpu().numpy()
+                all_z.append(z_mean)
+                all_labels.append(label)
+    z_array = np.array(all_z)
+    if proj_head is not None:
+        z_array = project_embeddings(z_array, proj_head)
+    labels = np.array(all_labels)
+    if was_training:
+        model.train()
+    if not np.isfinite(z_array).all() or len(set(labels)) < 2:
+        return float('nan')
+    return silhouette_score(z_array, labels)
 
 # --- 3.5 Graphics
 def visualize_sentence_flow(model, enc, step, save_dir="kahler_gutenberg"):
@@ -460,26 +458,24 @@ def estimate_validation_loss(model, dataloader_iter, criterion, t_span, val_batc
     """Estimate next-token validation loss on a small held-out stream window."""
     was_training = model.training
     model.eval()
-    try:
-        losses = []
-        with torch.no_grad():
-            for _ in range(val_batches):
-                try:
-                    x_val, y_val = next(dataloader_iter)
-                except StopIteration:
-                    break
-                x_val = x_val.to(device)
-                y_val = y_val.to(device)
-                logits, _ = model(x_val, t_span)
-                val_loss = criterion(logits.reshape(-1, model.embed_real.num_embeddings), y_val.reshape(-1))
-                if torch.isfinite(val_loss):
-                    losses.append(val_loss.detach())
-        if not losses:
-            return float('nan')
-        return torch.stack(losses).mean().item()
-    finally:
-        if was_training:
-            model.train()
+    losses = []
+    with torch.no_grad():
+        for _ in range(val_batches):
+            try:
+                x_val, y_val = next(dataloader_iter)
+            except StopIteration:
+                break
+            x_val = x_val.to(device)
+            y_val = y_val.to(device)
+            logits, _ = model(x_val, t_span)
+            val_loss = criterion(logits.reshape(-1, model.embed_real.num_embeddings), y_val.reshape(-1))
+            if torch.isfinite(val_loss):
+                losses.append(val_loss.detach())
+    if was_training:
+        model.train()
+    if not losses:
+        return float('nan')
+    return torch.stack(losses).mean().item()
 
 
 def run_gutenberg_experiment(model, num_epochs=10, max_steps=50000, save_every=2000, save_dir="kahler_gutenberg", proj_head=None,
@@ -593,21 +589,15 @@ def run_gutenberg_experiment(model, num_epochs=10, max_steps=50000, save_every=2
                     if global_step % val_every == 0:
                         val_loss = estimate_validation_loss(model, val_iter, criterion, t_span, val_batches=val_batches)
                     else:
-                        # Validation was intentionally skipped on this log row.
-                        # Print and write it as missing, not as a numeric NaN loss.
-                        val_loss = None
-                    val_ppl = math.exp(val_loss) if val_loss is not None and math.isfinite(val_loss) else None
+                        val_loss = float('nan')
+                    val_ppl = math.exp(val_loss) if math.isfinite(val_loss) else float('nan')
                     sil = compute_sentence_silhouette(model, proj_head)
                     current_lr = scheduler.get_last_lr()[0]
-                    print(
-                        f"{global_step:<8} | {epoch+1:<5} | {token_str:<9} | "
-                        f"{task_loss.item():<8.4f} | {format_metric(val_loss)} | "
-                        f"{ppl:<10.2f} | {sil:<10.4f} | {mean_speed:<8.4f} | {current_lr:<10.2e}"
-                    )
+                    print(f"{global_step:<8} | {epoch+1:<5} | {token_str:<9} | {task_loss.item():<8.4f} | {val_loss:<8.4f} | {ppl:<10.2f} | {sil:<10.4f} | {mean_speed:<8.4f} | {current_lr:<10.2e}")
 
                     with open(log_file, mode='a', newline='') as f:
                         writer = csv.writer(f)
-                        writer.writerow([global_step, epoch+1, total_tokens, task_loss.item(), csv_metric(val_loss), csv_metric(val_ppl), geo_loss.item(), collapse_penalty.item(), ppl, sil, mean_speed, current_lr])
+                        writer.writerow([global_step, epoch+1, total_tokens, task_loss.item(), val_loss, val_ppl, geo_loss.item(), collapse_penalty.item(), ppl, sil, mean_speed, current_lr])
 
             if global_step > 0 and global_step % save_every == 0:
                 print(f"\n--- Checkpoint (Step {global_step}, Epoch {epoch+1}) ---")
