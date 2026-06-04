@@ -18,8 +18,16 @@ import argparse
 import json
 import time
 
-os.environ["HF_HOME"] = "/home/fausap/Documents/LLM/CACHE/huggingface"
+os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 import math
+
+# Default training hyperparameters. Keep these at module scope because
+# helper functions such as generation, visualisation, and silhouette probes
+# need the same sequence length and ODE depth as the training loop.
+DIM = 384
+ODE_DEPTH = 2.5
+SEQ_LEN = 128
+BATCH_SIZE = 12
 
 # --- 0. DEVICE SELECTION ---
 if torch.backends.mps.is_available():
@@ -84,7 +92,10 @@ class ContextualKahlerODE(nn.Module):
             # Take the gradient w.r.t 'u' (the local state), NOT 'z'.
             # Taking the gradient w.r.t 'z' backpropagates through the causal attention,
             # which allows future tokens to flow backwards and leak into the current token's vector field.
-            grad_u = torch.autograd.grad(K, u, create_graph=True)[0]
+            # Only build higher-order parameter graphs during training. Evaluation
+            # still needs first-order gradients w.r.t. the ODE state, but it should
+            # not retain a full training graph for validation/generation probes.
+            grad_u = torch.autograd.grad(K, u, create_graph=self.training)[0]
 
         update = -(1.0 + 1.0j) * grad_u
 
@@ -204,22 +215,47 @@ def build_tokenizer(model_path="fineweb_tokenizer.model"):
     return tokenizer
 
 class FineWebStreamingDataset(IterableDataset):
-    """Streams FineWeb-Edu continuously without blowing up RAM."""
-    def __init__(self, seq_len=128):
+    """Streams FineWeb-Edu continuously without blowing up RAM.
+
+    FineWeb-Edu only exposes a train split for this sample, so we create a
+    deterministic held-out stream by reserving every Nth document for
+    validation. Training skips those documents, which makes the validation loss
+    meaningfully non-overlapping instead of another measurement on the same
+    token stream.
+    """
+    def __init__(self, seq_len=128, split="train", val_reserve_every=100,
+                 shuffle_buffer=10_000, seed=42):
         super().__init__()
+        if split not in {"train", "validation"}:
+            raise ValueError("split must be 'train' or 'validation'")
         self.seq_len = seq_len
-        print("Initializing FineWeb-Edu 10BT streaming dataset...")
+        self.split = split
+        self.val_reserve_every = max(2, val_reserve_every)
+        self.shuffle_buffer = shuffle_buffer
+        self.seed = seed
+        print(f"Initializing FineWeb-Edu 10BT {split} streaming dataset...")
 
     def __iter__(self):
         dataset = load_dataset('HuggingFaceFW/fineweb-edu', name='sample-10BT', split='train', streaming=True)
+        if self.split == "train" and self.shuffle_buffer > 0:
+            dataset = dataset.shuffle(seed=self.seed, buffer_size=self.shuffle_buffer)
+
         buffer = []
-        for item in dataset:
+        for doc_idx, item in enumerate(dataset):
+            is_validation_doc = (doc_idx % self.val_reserve_every) == 0
+            if self.split == "validation" and not is_validation_doc:
+                continue
+            if self.split == "train" and is_validation_doc:
+                continue
+
             text = item['text']
             tokens = enc.encode_ordinary(text)
             tokens.append(enc.eot_token)
             buffer.extend(tokens)
-            
-            # Yield chunks of length seq_len
+
+            # Yield contiguous next-token-prediction chunks. Keep one-token
+            # overlap between chunks so the first target in the next chunk is
+            # not silently skipped.
             while len(buffer) > self.seq_len:
                 x = torch.tensor(buffer[:self.seq_len], dtype=torch.long)
                 y = torch.tensor(buffer[1:self.seq_len+1], dtype=torch.long)
@@ -241,32 +277,56 @@ descriptive_sentences = [
 # Primary sentence for per-token flow visualization
 viz_sentence = "Mary opens the door at night"
 
+
+def format_metric(value, width=8, precision=4):
+    """Format optional metrics for console output without implying NaN loss."""
+    if value is None or not math.isfinite(value):
+        return f"{'--':<{width}}"
+    return f"{value:<{width}.{precision}f}"
+
+
+def csv_metric(value):
+    """Keep skipped optional metrics empty in CSV while preserving real numbers."""
+    if value is None or not math.isfinite(value):
+        return ""
+    return value
+
+
+def clean_piece(piece):
+    """Normalize SentencePiece/BPE display artifacts for token labeling."""
+    return piece.replace('▁', '').replace('Ġ', '').strip().lower()
+
 def compute_sentence_silhouette(model, proj_head=None):
     """Silhouette on sentence-level embeddings: action vs descriptive.
     Each sentence is mean-pooled over token positions after ODE flow."""
+    was_training = model.training
     model.eval()
-    all_z = []
-    all_labels = []
-    with torch.no_grad():
-        t_span = torch.tensor([0.0, ODE_DEPTH], device=device)
-        for label, group in [(1, action_sentences), (0, descriptive_sentences)]:
-            for sentence in group:
-                tokens = enc.encode_ordinary(sentence)
-                input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
-                z = model.embed(input_ids)
-                for ode_func in model.ode_funcs:
-                    z = odeint(ode_func, z, t_span, method='euler', options={'step_size': 1.25})[-1]
-                # Mean-pool over token positions → one vector per sentence
-                z_mean = torch.view_as_real(z[0]).reshape(z.shape[1], -1).mean(dim=0).cpu().numpy()
-                all_z.append(z_mean)
-                all_labels.append(label)
-    z_array = np.array(all_z)
-    if proj_head is not None:
-        z_array = project_embeddings(z_array, proj_head)
-    labels = np.array(all_labels)
-    if not np.isfinite(z_array).all() or len(set(labels)) < 2:
-        return float('nan')
-    return silhouette_score(z_array, labels)
+    try:
+        all_z = []
+        all_labels = []
+        with torch.no_grad():
+            t_span = torch.tensor([0.0, ODE_DEPTH], device=device)
+            for label, group in [(1, action_sentences), (0, descriptive_sentences)]:
+                for sentence in group:
+                    tokens = enc.encode_ordinary(sentence)
+                    input_ids = torch.tensor([tokens], dtype=torch.long, device=device)
+                    z = model.embed(input_ids)
+                    for ode_func in model.ode_funcs:
+                        z = odeint(ode_func, z, t_span, method='euler', options={'step_size': 1.25})[-1]
+                    # Mean-pool over token positions → one vector per sentence
+                    z_mean = torch.view_as_real(z[0]).reshape(z.shape[1], -1).mean(dim=0).cpu().numpy()
+                    all_z.append(z_mean)
+                    all_labels.append(label)
+        z_array = np.array(all_z)
+        if proj_head is not None:
+            z_array = project_embeddings(z_array, proj_head)
+        labels = np.array(all_labels)
+        if not np.isfinite(z_array).all() or len(set(labels)) < 2:
+            return float('nan')
+        return silhouette_score(z_array, labels)
+    finally:
+        if was_training:
+            model.train()
 
 # --- 3.5 Graphics
 def visualize_sentence_flow(model, enc, step, save_dir="kahler_gutenberg"):
@@ -275,6 +335,7 @@ def visualize_sentence_flow(model, enc, step, save_dir="kahler_gutenberg"):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
+    was_training = model.training
     model.eval()
     tokens = enc.encode_ordinary(viz_sentence)
     words = [enc.decode([t]) for t in tokens]
@@ -285,7 +346,7 @@ def visualize_sentence_flow(model, enc, step, save_dir="kahler_gutenberg"):
     
     # We must strip any leading/trailing spaces or SentencePiece underscores 
     # to reliably check if a word is a function word.
-    colors = ['blue' if w.replace(' ', '').strip().lower() in function_words else 'red' for w in words]
+    colors = ['blue' if clean_piece(w) in function_words else 'red' for w in words]
 
     t_steps = torch.linspace(0.0, ODE_DEPTH, steps=30, device=device)
 
@@ -311,6 +372,8 @@ def visualize_sentence_flow(model, enc, step, save_dir="kahler_gutenberg"):
 
     final_real = traj_real[-1]
     n_components = min(2, final_real.shape[0] - 1, final_real.shape[1])
+    if n_components < 1:
+        raise ValueError(f"Need at least two token vectors for PCA visualization, got shape {final_real.shape}")
     pca = PCA(n_components=n_components)
     pca.fit(final_real)
 
@@ -321,6 +384,8 @@ def visualize_sentence_flow(model, enc, step, save_dir="kahler_gutenberg"):
     pc1 = traj_2d[:, :, 0]
     pc2 = traj_2d[:, :, 1] if n_components >= 2 else np.zeros_like(pc1)
     ev = pca.explained_variance_ratio_ * 100
+    ev1 = ev[0] if len(ev) >= 1 else 0.0
+    ev2 = ev[1] if len(ev) >= 2 else 0.0
 
     plt.figure(figsize=(14, 12))
     plt.title(f'Sentence Flow: "{viz_sentence}" (Step {step})', fontsize=16)
@@ -334,8 +399,8 @@ def visualize_sentence_flow(model, enc, step, save_dir="kahler_gutenberg"):
                      xytext=(5, 5), textcoords='offset points',
                      fontsize=12, fontweight='bold', color=colors[i])
 
-    plt.xlabel(f"PC1 ({ev[0]:.1f}% var)", fontsize=14)
-    plt.ylabel(f"PC2 ({ev[1]:.1f}% var)" if len(ev) >= 2 else "PC2", fontsize=14)
+    plt.xlabel(f"PC1 ({ev1:.1f}% var)", fontsize=14)
+    plt.ylabel(f"PC2 ({ev2:.1f}% var)" if n_components >= 2 else "PC2", fontsize=14)
     plt.grid(True, linestyle='--', alpha=0.6)
 
     red_marker = mlines.Line2D([], [], color='red', marker='o', linestyle='None', markersize=10, label='Content (noun/verb)')
@@ -347,10 +412,13 @@ def visualize_sentence_flow(model, enc, step, save_dir="kahler_gutenberg"):
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"[+] Visualization saved to: {save_path}")
     plt.close()
+    if was_training:
+        model.train()
 
 def generate_text(model, enc, prompt, max_new_tokens=30, temperature=0.8):
     """Generate text using a sliding window of up to SEQ_LEN tokens.
     No padding — the model receives only real tokens."""
+    was_training = model.training
     model.eval()
     print(f"\n--- 📝 GENERATION TEST ---")
     tokens = enc.encode_ordinary(prompt)
@@ -384,48 +452,85 @@ def generate_text(model, enc, prompt, max_new_tokens=30, temperature=0.8):
             print(word, end='', flush=True)
             printed_len = len(new_text)
     print("\n\n--------------------------\n")
-    model.train()
+    if was_training:
+        model.train()
 
 # --- 4. THE TRAINING LOOP ---
-def run_gutenberg_experiment(model, num_epochs=10, max_steps=50000, save_every=2000, save_dir="kahler_gutenberg", proj_head=None):
+def estimate_validation_loss(model, dataloader_iter, criterion, t_span, val_batches=8):
+    """Estimate next-token validation loss on a small held-out stream window."""
+    was_training = model.training
+    model.eval()
+    try:
+        losses = []
+        with torch.no_grad():
+            for _ in range(val_batches):
+                try:
+                    x_val, y_val = next(dataloader_iter)
+                except StopIteration:
+                    break
+                x_val = x_val.to(device)
+                y_val = y_val.to(device)
+                logits, _ = model(x_val, t_span)
+                val_loss = criterion(logits.reshape(-1, model.embed_real.num_embeddings), y_val.reshape(-1))
+                if torch.isfinite(val_loss):
+                    losses.append(val_loss.detach())
+        if not losses:
+            return float('nan')
+        return torch.stack(losses).mean().item()
+    finally:
+        if was_training:
+            model.train()
+
+
+def run_gutenberg_experiment(model, num_epochs=10, max_steps=50000, save_every=2000, save_dir="kahler_gutenberg", proj_head=None,
+                             lr_max=1e-4, lr_min=1e-5, warmup_steps=500, val_every=500, val_batches=8,
+                             val_reserve_every=100, shuffle_buffer=10000, seed=42, batch_size=None, seq_len=None, ode_depth=None):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
     log_file = os.path.join(save_dir, "training_log.csv")
     with open(log_file, mode='w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Step', 'Epoch', 'Total_Tokens', 'Task_Loss', 'Geo_Loss', 'Collapse_Penalty', 'Perplexity', 'Silhouette', 'Mean_Speed'])
+        writer.writerow(['Step', 'Epoch', 'Total_Tokens', 'Task_Loss', 'Val_Loss', 'Val_Perplexity', 'Geo_Loss', 'Collapse_Penalty', 'Perplexity', 'Silhouette', 'Mean_Speed', 'Learning_Rate'])
 
-    # Cosine LR with warmup to break loss plateaus
-    LR_MAX = 1e-4
-    LR_MIN = 1e-5
-    WARMUP_STEPS = 500
-    # LambdaLR multiplies base_lr by lr_lambda — so base_lr must be LR_MAX
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR_MAX, weight_decay=1e-4)
+    batch_size = batch_size if batch_size is not None else BATCH_SIZE
+    seq_len = seq_len if seq_len is not None else SEQ_LEN
+    ode_depth = ode_depth if ode_depth is not None else ODE_DEPTH
+
+    # Cosine LR with warmup to break loss plateaus. AdamW decouples weight
+    # decay from the adaptive update, which is less likely to distort the
+    # potential geometry than Adam's coupled L2 penalty.
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr_max, betas=(0.9, 0.95), weight_decay=1e-4)
 
     def lr_lambda(step):
-        if step < WARMUP_STEPS:
-            return step / WARMUP_STEPS           # 0 → 1.0
-        progress = (step - WARMUP_STEPS) / max(1, max_steps - WARMUP_STEPS)
+        if step < warmup_steps:
+            return max(1, step + 1) / warmup_steps
+        progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
+        progress = min(max(progress, 0.0), 1.0)
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-        # Scale from 1.0 (= LR_MAX) down to LR_MIN/LR_MAX
-        return LR_MIN / LR_MAX + (1.0 - LR_MIN / LR_MAX) * cosine
+        # Scale from 1.0 (= lr_max) down to lr_min/lr_max
+        return lr_min / lr_max + (1.0 - lr_min / lr_max) * cosine
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     criterion = nn.CrossEntropyLoss()
-    t_span = torch.tensor([0.0, ODE_DEPTH], device=device)
+    t_span = torch.tensor([0.0, ode_depth], device=device)
 
-    dataset = FineWebStreamingDataset(seq_len=SEQ_LEN)
+    dataset = FineWebStreamingDataset(seq_len=seq_len, split="train", val_reserve_every=val_reserve_every,
+                                      shuffle_buffer=shuffle_buffer, seed=seed)
+    val_dataset = FineWebStreamingDataset(seq_len=seq_len, split="validation", val_reserve_every=val_reserve_every,
+                                          shuffle_buffer=0, seed=seed)
     # IterableDataset does not support shuffle or drop_last
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE)
-    tokens_per_step = BATCH_SIZE * SEQ_LEN
+    dataloader = DataLoader(dataset, batch_size=batch_size)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size)
+    val_iter = iter(val_dataloader)
+    tokens_per_step = batch_size * seq_len
 
     print(f"\nStarting FineWeb Training...")
     print(f"Epochs: {num_epochs} | Max steps: {max_steps:,}")
-    print(f"LR schedule: warmup {WARMUP_STEPS} steps → {LR_MAX} → cosine decay → {LR_MIN}")
+    print(f"LR schedule: warmup {warmup_steps} steps → {lr_max} → cosine decay → {lr_min}")
     print(f"Logging metrics to: {log_file}")
-    print(f"{'Step':<8} | {'Epoch':<5} | {'Tokens':<9} |{'Loss':<8} | {'Perplexity':<10} | {'Silhouette':<10} | {'Speed':<8}")
+    print(f"{'Step':<8} | {'Epoch':<5} | {'Tokens':<9} | {'Train':<8} | {'Val':<8} | {'PPL':<10} | {'Sil':<10} | {'Speed':<8} | {'LR':<10}")
 
     model.train()
     global_step = 0
@@ -442,7 +547,7 @@ def run_gutenberg_experiment(model, num_epochs=10, max_steps=50000, save_every=2
 
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             logits, z_final = model(x_batch, t_span)
             z0 = model.embed(x_batch)
@@ -485,12 +590,24 @@ def run_gutenberg_experiment(model, num_epochs=10, max_steps=50000, save_every=2
                         token_str = f"{total_tokens/1000:.1f}K"
 
                     ppl = torch.exp(task_loss).item()
+                    if global_step % val_every == 0:
+                        val_loss = estimate_validation_loss(model, val_iter, criterion, t_span, val_batches=val_batches)
+                    else:
+                        # Validation was intentionally skipped on this log row.
+                        # Print and write it as missing, not as a numeric NaN loss.
+                        val_loss = None
+                    val_ppl = math.exp(val_loss) if val_loss is not None and math.isfinite(val_loss) else None
                     sil = compute_sentence_silhouette(model, proj_head)
-                    print(f"{global_step:<8} | {epoch+1:<5} | {token_str:<9} | {task_loss.item():<8.4f} | {ppl:<10.2f} | {sil:<10.4f} | {mean_speed:<8.4f}")
+                    current_lr = scheduler.get_last_lr()[0]
+                    print(
+                        f"{global_step:<8} | {epoch+1:<5} | {token_str:<9} | "
+                        f"{task_loss.item():<8.4f} | {format_metric(val_loss)} | "
+                        f"{ppl:<10.2f} | {sil:<10.4f} | {mean_speed:<8.4f} | {current_lr:<10.2e}"
+                    )
 
                     with open(log_file, mode='a', newline='') as f:
                         writer = csv.writer(f)
-                        writer.writerow([global_step, epoch+1, total_tokens, task_loss.item(), geo_loss.item(), collapse_penalty.item(), ppl, sil, mean_speed])
+                        writer.writerow([global_step, epoch+1, total_tokens, task_loss.item(), csv_metric(val_loss), csv_metric(val_ppl), geo_loss.item(), collapse_penalty.item(), ppl, sil, mean_speed, current_lr])
 
             if global_step > 0 and global_step % save_every == 0:
                 print(f"\n--- Checkpoint (Step {global_step}, Epoch {epoch+1}) ---")
@@ -504,12 +621,27 @@ def run_gutenberg_experiment(model, num_epochs=10, max_steps=50000, save_every=2
                     "dataset": "HuggingFaceFW/fineweb-edu (sample-10BT)",
                     "tokenizer": "fineweb_tokenizer.model",
                     "epoch": epoch + 1,
-                    "step_reached": global_step
+                    "step_reached": global_step,
+                    "seq_len": seq_len,
+                    "batch_size": batch_size,
+                    "ode_depth": ode_depth,
+                    "optimizer": "AdamW",
+                    "lr_max": lr_max,
+                    "lr_min": lr_min,
+                    "warmup_steps": warmup_steps,
+                    "val_reserve_every": val_reserve_every,
+                    "shuffle_buffer": shuffle_buffer
                 }
                 with open(os.path.join(save_dir, "config.json"), "w") as f:
                     json.dump(config, f, indent=4)
                 print(f"[+] Model weights and config saved.")
-                visualize_sentence_flow(model, enc, step=global_step, save_dir=save_dir)
+                try:
+                    visualize_sentence_flow(model, enc, step=global_step, save_dir=save_dir)
+                except Exception as exc:
+                    if model.training is False:
+                        model.train()
+                    print(f"[warn] Visualization failed at step {global_step}: {exc}")
+                    print("[warn] Continuing training; checkpoint weights/config were already saved.")
                 print("--------------------------------------\n")
 
             if global_step > 0 and global_step % 5000 == 0:
@@ -530,21 +662,35 @@ def parse_args():
     parser.add_argument('--max-steps', type=int, default=100000, help='Maximum number of training steps')
     parser.add_argument('--save-every', type=int, default=5000, help='Save checkpoint every N steps')
     parser.add_argument('--save-dir', type=str, default='kahler_fineweb', help='Directory to save checkpoints and logs')
+    parser.add_argument('--dim', type=int, default=DIM, help='Complex embedding dimension')
+    parser.add_argument('--ode-depth', type=float, default=ODE_DEPTH, help='ODE integration depth')
+    parser.add_argument('--seq-len', type=int, default=SEQ_LEN, help='Training sequence length')
+    parser.add_argument('--batch-size', type=int, default=BATCH_SIZE, help='Training batch size')
+    parser.add_argument('--lr-max', type=float, default=1e-4, help='Peak learning rate')
+    parser.add_argument('--lr-min', type=float, default=1e-5, help='Final cosine-decay learning rate')
+    parser.add_argument('--warmup-steps', type=int, default=500, help='Learning-rate warmup steps')
+    parser.add_argument('--val-every', type=int, default=500, help='Run validation every N steps')
+    parser.add_argument('--val-batches', type=int, default=8, help='Held-out batches per validation estimate')
+    parser.add_argument('--val-reserve-every', type=int, default=100, help='Reserve every Nth streamed document for validation')
+    parser.add_argument('--shuffle-buffer', type=int, default=10000, help='Streaming shuffle buffer for training documents')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for stream shuffling')
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    DIM = 384
-    ODE_DEPTH = 2.5
-    SEQ_LEN = 128
-    BATCH_SIZE = 12
 
-    global enc, vocab_size
+    global enc, vocab_size, DIM, ODE_DEPTH, SEQ_LEN, BATCH_SIZE
+    DIM = args.dim
+    ODE_DEPTH = args.ode_depth
+    SEQ_LEN = args.seq_len
+    BATCH_SIZE = args.batch_size
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     enc = build_tokenizer("fineweb_tokenizer.model")
     vocab_size = enc.n_vocab
 
-    model = KahlerTransformerODE(vocab_size=vocab_size, dim=DIM).to(device)
+    model = KahlerTransformerODE(vocab_size=vocab_size, dim=args.dim).to(device)
     print_model_parameters(model)
 
     proj_head = None
@@ -559,6 +705,17 @@ def main():
         save_every=args.save_every,
         save_dir=args.save_dir,
         proj_head=proj_head,
+        lr_max=args.lr_max,
+        lr_min=args.lr_min,
+        warmup_steps=args.warmup_steps,
+        val_every=args.val_every,
+        val_batches=args.val_batches,
+        val_reserve_every=args.val_reserve_every,
+        shuffle_buffer=args.shuffle_buffer,
+        seed=args.seed,
+        batch_size=args.batch_size,
+        seq_len=args.seq_len,
+        ode_depth=args.ode_depth,
     )
 
 
