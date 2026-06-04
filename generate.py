@@ -69,10 +69,11 @@ class ContextualKahlerODE(nn.Module):
             causal_mask = nn.Transformer.generate_square_subsequent_mask(seq_len).to(z.device)
             context_real, _ = self.attention(z_real, z_real, z_real, is_causal=True, attn_mask=causal_mask)
             context_complex = torch.complex(context_real[..., :self.dim], context_real[..., self.dim:])
-            K = self.potential_net(context_complex + z).sum()
-            grad_z = torch.autograd.grad(K, z, create_graph=True)[0]
+            u = context_complex + z
+            K = self.potential_net(u).sum()
+            grad_u = torch.autograd.grad(K, u, create_graph=self.training)[0]
 
-        update = -(1.0 + 1.0j) * grad_z
+        update = -(1.0 + 1.0j) * grad_u
 
         MAX_FIELD = 10.0
         norm = torch.abs(update).norm(dim=-1, keepdim=True)
