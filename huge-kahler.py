@@ -277,6 +277,25 @@ descriptive_sentences = [
 # Primary sentence for per-token flow visualization
 viz_sentence = "Mary opens the door at night"
 
+
+def format_metric(value, width=8, precision=4):
+    """Format optional metrics for console output without implying NaN loss."""
+    if value is None or not math.isfinite(value):
+        return f"{'--':<{width}}"
+    return f"{value:<{width}.{precision}f}"
+
+
+def csv_metric(value):
+    """Keep skipped optional metrics empty in CSV while preserving real numbers."""
+    if value is None or not math.isfinite(value):
+        return ""
+    return value
+
+
+def clean_piece(piece):
+    """Normalize SentencePiece/BPE display artifacts for token labeling."""
+    return piece.replace('▁', '').replace('Ġ', '').strip().lower()
+
 def compute_sentence_silhouette(model, proj_head=None):
     """Silhouette on sentence-level embeddings: action vs descriptive.
     Each sentence is mean-pooled over token positions after ODE flow."""
@@ -325,7 +344,7 @@ def visualize_sentence_flow(model, enc, step, save_dir="kahler_gutenberg"):
     
     # We must strip any leading/trailing spaces or SentencePiece underscores 
     # to reliably check if a word is a function word.
-    colors = ['blue' if w.replace(' ', '').strip().lower() in function_words else 'red' for w in words]
+    colors = ['blue' if clean_piece(w) in function_words else 'red' for w in words]
 
     t_steps = torch.linspace(0.0, ODE_DEPTH, steps=30, device=device)
 
@@ -351,6 +370,8 @@ def visualize_sentence_flow(model, enc, step, save_dir="kahler_gutenberg"):
 
     final_real = traj_real[-1]
     n_components = min(2, final_real.shape[0] - 1, final_real.shape[1])
+    if n_components < 1:
+        raise ValueError(f"Need at least two token vectors for PCA visualization, got shape {final_real.shape}")
     pca = PCA(n_components=n_components)
     pca.fit(final_real)
 
@@ -361,6 +382,8 @@ def visualize_sentence_flow(model, enc, step, save_dir="kahler_gutenberg"):
     pc1 = traj_2d[:, :, 0]
     pc2 = traj_2d[:, :, 1] if n_components >= 2 else np.zeros_like(pc1)
     ev = pca.explained_variance_ratio_ * 100
+    ev1 = ev[0] if len(ev) >= 1 else 0.0
+    ev2 = ev[1] if len(ev) >= 2 else 0.0
 
     plt.figure(figsize=(14, 12))
     plt.title(f'Sentence Flow: "{viz_sentence}" (Step {step})', fontsize=16)
@@ -374,8 +397,8 @@ def visualize_sentence_flow(model, enc, step, save_dir="kahler_gutenberg"):
                      xytext=(5, 5), textcoords='offset points',
                      fontsize=12, fontweight='bold', color=colors[i])
 
-    plt.xlabel(f"PC1 ({ev[0]:.1f}% var)", fontsize=14)
-    plt.ylabel(f"PC2 ({ev[1]:.1f}% var)" if len(ev) >= 2 else "PC2", fontsize=14)
+    plt.xlabel(f"PC1 ({ev1:.1f}% var)", fontsize=14)
+    plt.ylabel(f"PC2 ({ev2:.1f}% var)" if n_components >= 2 else "PC2", fontsize=14)
     plt.grid(True, linestyle='--', alpha=0.6)
 
     red_marker = mlines.Line2D([], [], color='red', marker='o', linestyle='None', markersize=10, label='Content (noun/verb)')
@@ -602,7 +625,13 @@ def run_gutenberg_experiment(model, num_epochs=10, max_steps=50000, save_every=2
                 with open(os.path.join(save_dir, "config.json"), "w") as f:
                     json.dump(config, f, indent=4)
                 print(f"[+] Model weights and config saved.")
-                visualize_sentence_flow(model, enc, step=global_step, save_dir=save_dir)
+                try:
+                    visualize_sentence_flow(model, enc, step=global_step, save_dir=save_dir)
+                except Exception as exc:
+                    if model.training is False:
+                        model.train()
+                    print(f"[warn] Visualization failed at step {global_step}: {exc}")
+                    print("[warn] Continuing training; checkpoint weights/config were already saved.")
                 print("--------------------------------------\n")
 
             if global_step > 0 and global_step % 5000 == 0:
