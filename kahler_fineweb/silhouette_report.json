@@ -1,0 +1,25 @@
+{
+  "overall_silhouette": 0.30862879753112793,
+  "mean_sil_per_class": {
+    "0": 0.4714926481246948,
+    "1": 0.22719688713550568
+  },
+  "counts_per_class": {
+    "0": 100,
+    "1": 200
+  },
+  "centroid_distance_full_space": 12.598287582397461,
+  "intra_class_variance": {
+    "1": 84.7970199584961,
+    "0": 40.80527877807617
+  },
+  "pca_explained_variance_percent": [
+    42.70049285888672,
+    11.27525520324707
+  ],
+  "umap_2d_silhouette": 0.683945894241333,
+  "umap_n_neighbors": 15,
+  "umap_min_dist": 0.1,
+  "pca_2d_silhouette": 0.5487928986549377,
+  "tsne_2d_silhouette": 0.6829546689987183
+}

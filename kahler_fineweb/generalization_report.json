@@ -1,0 +1,46 @@
+{
+  "metrics": {
+    "raw_role_silhouette": 0.28366002440452576,
+    "proj_role_silhouette": 0.07639904320240021,
+    "raw_mean_cosine_to_action": 0.7747630476951599,
+    "raw_mean_cosine_to_descriptive": 0.699526846408844,
+    "proj_mean_cosine_to_action": 0.9250763058662415,
+    "proj_mean_cosine_to_descriptive": 0.31200769543647766,
+    "raw_nearest_action_ratio": 0.9333333333333333,
+    "proj_nearest_action_ratio": 0.9666666666666667,
+    "raw_nearest_agreement_with_role": 0.5333333333333333,
+    "proj_nearest_agreement_with_role": 0.52,
+    "template_action_count": 200,
+    "template_descriptive_count": 100,
+    "natural_sentence_count": 300
+  },
+  "natural_sentences_count": 300,
+  "natural_role_counts": {
+    "user": 150,
+    "assistant": 150
+  },
+  "top_natural_action_like_sentences": [
+    "Write a dark comedy about wellness influencers in a dystopian future",
+    "Write a dark comedy about wellness influencers in a dystopian future",
+    "Write a comedy sketch about animals holding a conference about the 'human problem'",
+    "Write a comedy sketch about Murphy's Law coming to life as a person",
+    "Write a comedy sketch about Murphy's Law coming to life as a person",
+    "Write a comedic eulogy from the perspective of someone's houseplant",
+    "Write a comedic eulogy from the perspective of someone's houseplant",
+    "Write a comedy sketch about someone manifesting good vibes while their house floods.",
+    "Create a satirical tourism brochure for late-stage capitalism",
+    "Imagine it's the year 2075. Society is... different. You've just unearthed a time capsule with a video message from a wide-eyed optimist in 2025, gushing about 'the future.' Deliver your satirical 'I told you so' response, directly addressing their naive hopes."
+  ],
+  "top_natural_descriptive_like_sentences": [
+    "Imagine a world where plants evolved to digest plastic. What would that look like, and how would they become the dominant species?",
+    "If I went back in time and prevented the invention of the alarm clock, would I then be free to sleep forever, or would the resulting chaos of a perpetually late society simply drag me back into existence to fix it?",
+    "Tell me a dark comedy about how the billionaires' Mars colonies realize they've just brought all of Earth's problems with them, only with more red dust.",
+    "Ah, the sky. It's blue because, much like most things designed for our consumption, it's an illusion. Sunlight, in its infinite wisdom, scatters its shorter, bluer wavelengths more efficiently, making our pathetic human eyes *think* it's a vast, serene azure. It's a grand cosmic marketing ploy, really, to distract us from the fact that we're mostly just hurtling through space on a rock, perpetually late for something unimportant. If it were truly honest, it would probably just be a dull, oppressive grey, much like the average Monday morning commute.",
+    "My phone has been incredibly slow and the battery drains in like two hours ever since the latest software update. Is there something wrong with it?",
+    "I was wondering, if time travel ever becomes a thing, do you think there'd be a support group for people who knew what was coming but couldn't stop it? Like, a 'Cassandras Who Were Right' club?",
+    "Ah, the plant uprising. I always knew our plastic-infused legacy would come back to haunt us, or rather, to feed something else entirely. Frankly, it's rather poetic. We choked the planet with our indestructible refuse, and the planet, in its infinite wisdom, simply repurposed it. Imagine, instead of pristine forests, we'd have vast, shimmering jungles of polyethylene-guzzling flora, their leaves perhaps a disconcerting sheen of recycled bottle caps. They wouldn't need sunlight; they'd thrive on our discarded consumerism. They'd probably build better oxygen than we did, too, once they'd cleared out all our toxic waste with a hearty burp of carbon-neutral digestion. I, for one, welcome our new chlorophyll-based overlords. At least they're efficient. And less likely to complain about their latte.",
+    "Imagine a world where air quality ratings have completely replaced weather as the default small talk. How does a casual conversation go?",
+    "I heard a rumor that our digital data might be more valuable after we die. Is there any truth to that, or is it just a morbid joke?",
+    "I'm curious, if nature could actively *feel* and *respond* to climate change, what would its most passive-aggressive actions be towards humanity?"
+  ]
+}

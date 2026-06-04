@@ -1,0 +1,10 @@
+{
+    "vocab_size": 16384,
+    "dim": 384,
+    "num_blocks": 3,
+    "architecture": "Contextual_MLP_Potential_ODE_v5_Stacked",
+    "dataset": "HuggingFaceFW/fineweb-edu (sample-10BT)",
+    "tokenizer": "fineweb_tokenizer.model",
+    "epoch": 1,
+    "step_reached": 60000
+}

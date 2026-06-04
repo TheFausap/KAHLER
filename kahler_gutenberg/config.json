@@ -1,0 +1,10 @@
+{
+    "vocab_size": 12150,
+    "dim": 384,
+    "num_blocks": 3,
+    "architecture": "Contextual_MLP_Potential_ODE_v5_Stacked",
+    "dataset": "deven367/babylm-100M-gutenberg",
+    "tokenizer": "kahler_tokenizer.model",
+    "epoch": 5,
+    "step_reached": 38000
+}

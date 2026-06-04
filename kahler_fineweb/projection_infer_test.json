@@ -1,0 +1,12 @@
+{
+  "projection_head": "KAHLER/kahler_fineweb/projection_head_mixed.pt",
+  "input_shape": [
+    300,
+    768
+  ],
+  "projected_shape": [
+    300,
+    128
+  ],
+  "output_path": "KAHLER/kahler_fineweb/projected_embeddings_test.npy"
+}

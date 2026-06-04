@@ -1,0 +1,7 @@
+{
+  "raw_euclidean": 0.30862879753112793,
+  "l2_cosine": 0.29015102982521057,
+  "zscore_euclidean": 0.20578190684318542,
+  "pca_whiten_euclidean": 4.0617351260152645e-06,
+  "raw_cosine": 0.4434654116630554
+}

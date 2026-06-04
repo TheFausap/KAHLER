@@ -1,0 +1,26 @@
+{
+  "task": "sentiment",
+  "limit": 500,
+  "splits": {
+    "train": {
+      "silhouette": -0.012795732356607914,
+      "mean_cosine_within": 0.8133885264396667,
+      "mean_cosine_between": 0.8105056285858154,
+      "cosine_gap": 0.0028828978538513184,
+      "train_to_validation_knn": 0.416
+    },
+    "validation": {
+      "silhouette": -0.014857298694550991,
+      "mean_cosine_within": 0.8027936220169067,
+      "mean_cosine_between": 0.7991095185279846,
+      "cosine_gap": 0.003684103488922119
+    },
+    "test": {
+      "silhouette": -0.01296936720609665,
+      "mean_cosine_within": 0.7726064920425415,
+      "mean_cosine_between": 0.7694805264472961,
+      "cosine_gap": 0.0031259655952453613
+    }
+  },
+  "projection_head": null
+}
